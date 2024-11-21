@@ -1,60 +1,3 @@
-#!/bin/bash
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-echo -e "${GREEN}Starting OLED display setup...${NC}"
-
-# Function to check if a command was successful
-check_status() {
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ $1${NC}"
-    else
-        echo -e "${RED}✗ $1 failed${NC}"
-        exit 1
-    fi
-}
-
-# Check if script is run as root
-if [ "$EUID" -ne 0 ]; then
-    echo -e "${RED}Please run as root (use sudo)${NC}"
-    exit 1
-fi
-
-# Update package list
-echo -e "${YELLOW}Updating package list...${NC}"
-apt update
-check_status "Package list update"
-
-# Install required packages
-echo -e "${YELLOW}Installing required packages...${NC}"
-apt install -y python3-pip python3-pil python3-psutil i2c-tools curl git
-check_status "Package installation"
-
-# Install luma.oled
-echo -e "${YELLOW}Installing luma.oled...${NC}"
-apt install -y python3-luma.oled
-check_status "Luma.OLED installation"
-
-# Enable I2C interface
-echo -e "${YELLOW}Enabling I2C interface...${NC}"
-if ! grep -q "i2c-dev" /etc/modules; then
-    echo "i2c-dev" >> /etc/modules
-fi
-raspi-config nonint do_i2c 0
-check_status "I2C interface enable"
-
-# Create directory for the monitor script
-echo -e "${YELLOW}Creating directory for monitor script...${NC}"
-mkdir -p /opt/network-monitor
-check_status "Directory creation"
-
-# Create the network monitor script
-echo -e "${YELLOW}Creating network monitor script...${NC}"
-cat > /opt/network-monitor/network_monitor.py << 'EOL'
 import time
 import psutil
 import subprocess
@@ -81,6 +24,9 @@ def format_speed(speed_kbps):
 
 def get_network_speed(interface):
     try:
+        # Reset network stats to prevent stuck counters
+        psutil.net_io_counters.cache_clear()
+        
         # Get initial bytes
         net_stat = psutil.net_io_counters(pernic=True)
         if interface not in net_stat:
@@ -91,6 +37,9 @@ def get_network_speed(interface):
         
         time.sleep(1)  # Wait 1 second
         
+        # Clear cache again before second reading
+        psutil.net_io_counters.cache_clear()
+        
         # Get final bytes
         net_stat = psutil.net_io_counters(pernic=True)
         bytes_sent_new = net_stat[interface].bytes_sent
@@ -100,6 +49,12 @@ def get_network_speed(interface):
         upload_speed = (bytes_sent_new - bytes_sent) / 1024
         download_speed = (bytes_recv_new - bytes_recv) / 1024
         
+        # Sanity check - if values are unreasonable, return 0
+        if upload_speed < 0 or upload_speed > 1024 * 1024 * 1024:  # > 1 TB/s is unlikely
+            upload_speed = 0
+        if download_speed < 0 or download_speed > 1024 * 1024 * 1024:
+            download_speed = 0
+            
         return upload_speed, download_speed
     except Exception as e:
         print(f"Error getting network speed: {e}")
@@ -132,6 +87,9 @@ def main():
     # Initialize OLED
     device = ssd1306(serial, width=128, height=64)
     
+    # Counter for periodic full reset
+    reset_counter = 0
+    
     while True:
         try:
             # Get active interface
@@ -153,10 +111,18 @@ def main():
             
             # Draw on OLED
             with canvas(device) as draw:
-                draw.text((0, 0), f"Public: {public_ip}", fill="white")
-                draw.text((0, 16), f"Local: {local_ip}", fill="white")
+                draw.text((0, 0), f"Ext: {public_ip}", fill="white")
+                draw.text((0, 16), f"Int: {local_ip}", fill="white")
                 draw.text((0, 32), f"Up: {upload_str}", fill="white")
                 draw.text((0, 48), f"Down: {download_str}", fill="white")
+            
+            # Increment reset counter
+            reset_counter += 1
+            
+            # Every 60 iterations (about 1 minute), clear psutil's cache completely
+            if reset_counter >= 60:
+                psutil.net_io_counters.cache_clear()
+                reset_counter = 0
             
         except KeyboardInterrupt:
             break
@@ -166,67 +132,11 @@ def main():
                 draw.text((0, 0), "Error:", fill="white")
                 draw.text((0, 16), str(e)[:20], fill="white")
             time.sleep(5)
+            # Reset psutil cache on error
+            psutil.net_io_counters.cache_clear()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         print("Exiting...")
-EOL
-check_status "Script creation"
-
-# Make the script executable
-chmod +x /opt/network-monitor/network_monitor.py
-check_status "Script permissions"
-
-# Create systemd service
-echo -e "${YELLOW}Creating systemd service...${NC}"
-cat > /etc/systemd/system/network-monitor.service << EOL
-[Unit]
-Description=Network Monitor OLED Display
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/python3 /opt/network-monitor/network_monitor.py
-Restart=always
-User=root
-Environment=PYTHONUNBUFFERED=1
-
-[Install]
-WantedBy=multi-user.target
-EOL
-check_status "Service creation"
-
-# Enable and start the service
-echo -e "${YELLOW}Enabling and starting service...${NC}"
-systemctl enable network-monitor
-systemctl start network-monitor
-check_status "Service setup"
-
-# Add current user to i2c group
-if [ "$SUDO_USER" ]; then
-    usermod -a -G i2c $SUDO_USER
-    check_status "User added to i2c group"
-fi
-
-# Final checks
-echo -e "${YELLOW}Performing final checks...${NC}"
-if systemctl is-active --quiet network-monitor; then
-    echo -e "${GREEN}✓ Service is running${NC}"
-else
-    echo -e "${RED}✗ Service failed to start${NC}"
-fi
-
-echo -e "\n${GREEN}Installation complete!${NC}"
-echo -e "\nUseful commands:"
-echo -e "${YELLOW}Check service status:${NC} sudo systemctl status network-monitor"
-echo -e "${YELLOW}View logs:${NC} sudo journalctl -u network-monitor -f"
-echo -e "${YELLOW}Restart service:${NC} sudo systemctl restart network-monitor"
-echo -e "${YELLOW}Stop service:${NC} sudo systemctl stop network-monitor"
-
-# Check if I2C device is detected
-echo -e "\n${YELLOW}Checking for I2C device...${NC}"
-i2cdetect -y 1
-
-echo -e "\n${GREEN}If you see '3C' in the i2cdetect output above, your OLED display is properly connected.${NC}"
-echo -e "${GREEN}The network monitor should now be running on your OLED display!${NC}"
