@@ -30,6 +30,7 @@ interface $WAN_IF
 
 interface $LAN_IF
 static ip_address=$ROUTER_IP/$MASK
+static domain_name_servers=1.1.1.1 1.0.0.1
 EOL
 
 # Configure dnsmasq
@@ -38,8 +39,6 @@ interface=$LAN_IF
 dhcp-range=$DHCP_START,$DHCP_END,${LEASE_TIME}h
 dhcp-option=option:router,$ROUTER_IP
 bind-interfaces
-no-resolv
-resolv-file=/etc/resolv.conf
 EOL
 
 # Enable IP forwarding
