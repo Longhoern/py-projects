@@ -16,7 +16,7 @@ read -p "Enter LAN interface name: " LAN_IF
 
 # Get network configuration from user
 read -p "Enter network address: " NETWORK_ADDR
-read -p "Enter network mask: " MASK
+read -p "Enter network mask (CIDR): " MASK
 read -p "Enter DHCP range start: " DHCP_START
 read -p "Enter DHCP range end: " DHCP_END
 read -p "Enter lease time in hours: " LEASE_TIME
