@@ -1,3 +1,67 @@
+#!/bin/bash
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Default installation directory
+INSTALL_DIR="/home/$SUDO_USER/display"
+
+echo -e "${GREEN}Starting OLED display setup...${NC}"
+
+# Function to check if a command was successful
+check_status() {
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ $1${NC}"
+    else
+        echo -e "${RED}✗ $1 failed${NC}"
+        exit 1
+    fi
+}
+
+# Check if script is run as root
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}Please run as root (use sudo)${NC}"
+    exit 1
+fi
+
+# Update package list
+echo -e "${YELLOW}Updating package list...${NC}"
+apt update
+check_status "Package list update"
+
+# Install required packages
+echo -e "${YELLOW}Installing required packages...${NC}"
+apt install -y python3-pip python3-pil python3-psutil i2c-tools curl git
+check_status "Package installation"
+
+# Install luma.oled
+echo -e "${YELLOW}Installing luma.oled...${NC}"
+apt install -y python3-luma.oled
+check_status "Luma.OLED installation"
+
+# Enable I2C interface
+echo -e "${YELLOW}Enabling I2C interface...${NC}"
+if ! grep -q "i2c-dev" /etc/modules; then
+    echo "i2c-dev" >> /etc/modules
+fi
+raspi-config nonint do_i2c 0
+check_status "I2C interface enable"
+
+# Create directory for the monitor script
+echo -e "${YELLOW}Creating directory for monitor script...${NC}"
+mkdir -p "$INSTALL_DIR"
+check_status "Directory creation"
+
+# Set proper ownership for the installation directory
+chown -R $SUDO_USER:$SUDO_USER "$INSTALL_DIR"
+check_status "Setting directory ownership"
+
+# Create the network monitor script
+echo -e "${YELLOW}Creating network monitor script...${NC}"
+cat > "$INSTALL_DIR/network-display.py" << 'EOL'
 import time
 import psutil
 import subprocess
@@ -140,3 +204,87 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("Exiting...")
+EOL
+check_status "Script creation"
+
+# Set proper permissions for the script
+chmod 755 "$INSTALL_DIR/network-display.py"
+chown root:root "$INSTALL_DIR/network-display.py"
+check_status "Script permissions"
+
+# Create systemd service
+echo -e "${YELLOW}Creating systemd service...${NC}"
+cat > /etc/systemd/system/network-monitor.service << EOL
+[Unit]
+Description=Network Monitor OLED Display
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/usr/bin/python3 $INSTALL_DIR/network-display.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=multi-user.target
+EOL
+check_status "Service creation"
+
+# Enable and start the service
+echo -e "${YELLOW}Enabling and starting service...${NC}"
+systemctl daemon-reload
+systemctl enable network-monitor
+systemctl start network-monitor
+check_status "Service setup"
+
+# Add current user to i2c group
+if [ "$SUDO_USER" ]; then
+    usermod -a -G i2c $SUDO_USER
+    check_status "User added to i2c group"
+fi
+
+# Final checks
+echo -e "${YELLOW}Performing final checks...${NC}"
+if systemctl is-active --quiet network-monitor; then
+    echo -e "${GREEN}✓ Service is running${NC}"
+else
+    echo -e "${RED}✗ Service failed to start${NC}"
+    echo -e "${YELLOW}Checking service logs:${NC}"
+    journalctl -u network-monitor -n 10
+fi
+
+# Installation cleanup
+echo -e "${YELLOW}Performing installation cleanup...${NC}"
+apt autoremove -y
+apt clean
+check_status "Cleanup"
+
+echo -e "\n${GREEN}Installation complete!${NC}"
+echo -e "\nInstallation details:"
+echo -e "${YELLOW}Script location:${NC} $INSTALL_DIR/network-display.py"
+echo -e "${YELLOW}Service location:${NC} /etc/systemd/system/network-monitor.service"
+echo -e "\nUseful commands:"
+echo -e "${YELLOW}Check service status:${NC} sudo systemctl status network-monitor"
+echo -e "${YELLOW}View logs:${NC} sudo journalctl -u network-monitor -f"
+echo -e "${YELLOW}Restart service:${NC} sudo systemctl restart network-monitor"
+echo -e "${YELLOW}Stop service:${NC} sudo systemctl stop network-monitor"
+
+# Check if I2C device is detected
+echo -e "\n${YELLOW}Checking for I2C device...${NC}"
+i2cdetect -y 1
+
+echo -e "\n${GREEN}If you see '3C' in the i2cdetect output above, your OLED display is properly connected.${NC}"
+echo -e "${GREEN}The network monitor should now be running on your OLED display!${NC}"
+
+# Add uninstall instructions
+echo -e "\n${YELLOW}To uninstall in the future, run these commands:${NC}"
+echo "sudo systemctl stop network-monitor"
+echo "sudo systemctl disable network-monitor"
+echo "sudo rm /etc/systemd/system/network-monitor.service"
+echo "sudo rm -rf $INSTALL_DIR"
+echo "sudo systemctl daemon-reload"
